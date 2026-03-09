@@ -17,6 +17,8 @@ const JWT_SECRET = 'super-secret-key-123';
 const ENCRYPTION_KEY = crypto.scryptSync('my-secret-pass', 'salt', 32);
 const IV = Buffer.alloc(16, 0); 
 
+const truncateLog = (str) => (str && str.length > 60) ? str.substring(0, 60) + '... (truncated)' : str;
+
 const encrypt = (text) => {
     if (!text) return text;
     const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, IV);
@@ -48,8 +50,16 @@ app.post('/register', (req, res) => {
     const { email, username, password } = req.body;
     if (!checkPwd(password)) return res.status(400).json({ error: 'Weak password' });
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    const encUsername = encrypt(username.toLowerCase());
+    const encEmail = encrypt(email.toLowerCase());
+
+    console.log(`\n🔒 [ENCRYPTION PROOF - REGISTRATION]`);
+    console.log(`Original Username: ${username} -> Encrypted: ${encUsername}`);
+    console.log(`Original Email: ${email} -> Encrypted: ${encEmail}\n`);
+
     db.run(`INSERT INTO users (username, email, password, verified, pin) VALUES (?, ?, ?, 0, ?)`, 
-        [encrypt(username.toLowerCase()), encrypt(email.toLowerCase()), bcrypt.hashSync(password, 8), pin], function(err) {
+        [encUsername, encEmail, bcrypt.hashSync(password, 8), pin], function(err) {
         if (err) return res.status(400).json({ error: 'Username or Email already in use.' });
         sendEmail(email, "Verify Account", pin);
         res.json({ message: 'Registered. Check console for PIN.' });
@@ -134,7 +144,14 @@ io.on('connection', (socket) => {
     };
 
     socket.on('updateProfile', (data) => {
-        db.run(`UPDATE users SET pfp = ?, about = ? WHERE username = ?`, [encrypt(data.pfp), encrypt(data.about), encrypt(myUser)]);
+        const encPfp = encrypt(data.pfp);
+        const encAbout = encrypt(data.about);
+
+        console.log(`\n🔒 [ENCRYPTION PROOF - PROFILE UPDATE]`);
+        console.log(`Original About: ${truncateLog(data.about)} -> Encrypted: ${truncateLog(encAbout)}`);
+        if (data.pfp) console.log(`Original PFP Base64: ${truncateLog(data.pfp)} -> Encrypted: ${truncateLog(encPfp)}\n`);
+
+        db.run(`UPDATE users SET pfp = ?, about = ? WHERE username = ?`, [encPfp, encAbout, encrypt(myUser)]);
     });
 
     socket.on('searchUser', (q) => {
@@ -155,7 +172,13 @@ io.on('connection', (socket) => {
     socket.on('handleInvite', ({ id, accept, sender }) => {
         db.run(`DELETE FROM invites WHERE id = ?`, [id], () => {
             if (accept) {
-                db.run(`INSERT INTO friends (u1, u2) VALUES (?, ?)`, [encrypt(myUser), encrypt(sender)], () => {
+                const encMe = encrypt(myUser);
+                const encSender = encrypt(sender);
+                
+                console.log(`\n🔒 [ENCRYPTION PROOF - CHAT LIST (FRIENDS)]`);
+                console.log(`Added Friend: ${sender} -> Encrypted in DB as: ${encSender}\n`);
+
+                db.run(`INSERT INTO friends (u1, u2) VALUES (?, ?)`, [encMe, encSender], () => {
                     io.to(sender).emit('syncReq'); 
                     syncData(); 
                 });
@@ -165,8 +188,14 @@ io.on('connection', (socket) => {
 
     socket.on('createGroup', (name) => {
         const gid = 'GRP_' + Date.now();
-        db.run(`INSERT INTO groups (id, name, owner) VALUES (?, ?, ?)`, [gid, encrypt(name), encrypt(myUser)], () => {
-            db.run(`INSERT INTO group_members (group_id, username) VALUES (?, ?)`, [gid, encrypt(myUser)], () => {
+        const encName = encrypt(name);
+        const encMe = encrypt(myUser);
+
+        console.log(`\n🔒 [ENCRYPTION PROOF - CHAT LIST (GROUPS)]`);
+        console.log(`Original Group Name: ${name} -> Encrypted: ${encName}\n`);
+
+        db.run(`INSERT INTO groups (id, name, owner) VALUES (?, ?, ?)`, [gid, encName, encMe], () => {
+            db.run(`INSERT INTO group_members (group_id, username) VALUES (?, ?)`, [gid, encMe], () => {
                 socket.join(gid);
                 syncData();
                 socket.emit('success', 'Group Created');
@@ -203,9 +232,15 @@ io.on('connection', (socket) => {
         const id = Date.now().toString();
         const isGroup = m.to.startsWith('GRP_');
         const rec = isGroup ? m.to : encrypt(m.to);
+        const encContent = encrypt(m.content);
+
+        console.log(`\n🔒 [ENCRYPTION PROOF - MESSAGE / MEDIA]`);
+        console.log(`Message Type: ${m.type.toUpperCase()}`);
+        console.log(`Original Text/Base64: ${truncateLog(m.content)}`);
+        console.log(`Encrypted in DB: ${truncateLog(encContent)}\n`);
         
         db.run(`INSERT INTO messages (id, sender, receiver, content, type, status, ts) VALUES (?, ?, ?, ?, ?, 'sent', ?)`,
-            [id, encrypt(myUser), rec, encrypt(m.content), m.type, Date.now()], () => {
+            [id, encrypt(myUser), rec, encContent, m.type, Date.now()], () => {
             
             const msgObj = { id, sender: myUser, receiver: m.to, content: m.content, type: m.type, status: 'sent', ts: Date.now(), edited: 0, deleted: 0 };
             
@@ -214,7 +249,7 @@ io.on('connection', (socket) => {
                 msgObj.status = 'delivered';
             }
             io.to(m.to).emit('msgUpdate', msgObj);
-            if (!isGroup) socket.emit('msgUpdate', msgObj); // Emit to self for direct msgs
+            if (!isGroup) socket.emit('msgUpdate', msgObj);
         });
     });
 
